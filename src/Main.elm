@@ -3,13 +3,15 @@ module Main exposing (..)
 import Browser
 import Debug
 import Html.Styled exposing (Html, button, div, text, tr, td, h1, toUnstyled, text)
-import Components exposing (snakeTable, emptyCell, snakeContainer, gameOverContainer, snakeCell)
+import Components exposing (snakeTable, emptyCell, foodCell, snakeContainer, gameOverContainer, snakeCell)
 import Html.Events exposing (onClick)
 import List
+import Util
 import Time
 import Json.Decode as Decode
 import Browser.Events as Events
 import Position exposing (Position, isPositionEqual)
+import Random
 
 main =
   Browser.element 
@@ -31,17 +33,25 @@ type SnakeMoveDirection
     | Right
     | Left
 
-type GameStatus = Running | Ended
+type GameStatus = Running | GameOver
+
+type alias SnakeHead = Position
+
+type alias SnakeTail = List Position
+
+type alias Food = Position
 
 type alias Snake =
-    { head : Position
+    { head : SnakeHead
     , moveDirection: SnakeMoveDirection
+    , tail : SnakeTail
     }
 
 type alias Model =
     { grid : Grid
     , snake : Snake
     , status: GameStatus
+    , food: Food
     }
 
 initGrid : Grid
@@ -53,7 +63,8 @@ initGrid =
 initSnake : Snake
 initSnake =
     { head = initSnakeHead
-    , moveDirection = Right
+    , moveDirection = Bottom
+    , tail = initSnakeTail
     }
 
 initSnakeHead : Position
@@ -62,18 +73,23 @@ initSnakeHead =
     , y = initGrid.rows // 2
     }
 
+initSnakeTail : List Position
+initSnakeTail =
+    [ { x = initSnakeHead.x, y = initSnakeHead.y - 1 }
+    , { x = initSnakeHead.x, y = initSnakeHead.y - 2 }
+    ]
+
 initData : Model
 initData =
     { grid = initGrid
     , snake = initSnake
     , status = Running
+    , food = { x = 0, y = 0 }
     }
 
 init: () -> (Model, Cmd Msg)
 init _ =
-    ( initData
-    , Cmd.none
-    )
+    generateFood initData
 
 isPositionOutside : Position -> Grid -> Bool
 isPositionOutside position grid 
@@ -85,49 +101,93 @@ isPositionOutside position grid
 moveSnake : Model -> (Model, Cmd Msg)
 moveSnake model =
     let
-        updatedModel = { model | snake = (changeSnake model.snake) }
+        updatedSnakeHead = changeSnakeHeadPosition model.snake
     in
-        if isPositionOutside updatedModel.snake.head model.grid then
-            ( { model | status = Ended }
+        if hasSnakeCollision model updatedSnakeHead then
+            ( { model | status = GameOver }
             , Cmd.none
             )
+        else if isPositionEqual updatedSnakeHead model.food then
+            generateFood { model | snake = extendSnake model.snake }
         else
-            ( updatedModel
+            ( {model | snake = changeSnakePosition model.snake}
             , Cmd.none
             )
 
-changeSnake : Snake -> Snake
-changeSnake snake =
+extendSnake : Snake -> Snake
+extendSnake snake =
+    let
+        newHeadPosition = changeSnakeHeadPosition snake
+        newTailPosition = [snake.head] ++ snake.tail
+    in
+        { snake | head = newHeadPosition, tail = newTailPosition }
+
+hasSnakeCollision : Model -> SnakeHead -> Bool
+hasSnakeCollision model updatedHeadPosition 
+    =  isPositionOutside updatedHeadPosition model.grid
+    || isSnakeTailPosition model.snake.tail updatedHeadPosition
+
+
+changeTailPosition : SnakeTail -> SnakeHead -> SnakeTail
+changeTailPosition tail oldHeadPosition =
+    [oldHeadPosition] ++ (Util.dropTail 1 tail)
+
+changeSnakePosition : Snake -> Snake
+changeSnakePosition snake =
+    let
+        newHeadPosition = changeSnakeHeadPosition snake
+        newTailPosition = changeTailPosition snake.tail snake.head
+    in
+        { snake | head = newHeadPosition, tail = newTailPosition }
+
+changeSnakeHeadPosition : Snake -> SnakeHead
+changeSnakeHeadPosition snake =
     let
         direction = snake.moveDirection
         x = snake.head.x
         y = snake.head.y
     in
         case direction of
-            Top -> { snake | head = {x = x, y = y - 1}}
-            Bottom -> { snake | head = {x = x, y = y + 1}}
-            Right -> { snake | head = {x = x + 1, y = y}}
-            Left -> { snake | head = {x = x - 1, y = y}}
+            Top -> {x = x, y = y - 1}
+            Bottom -> {x = x, y = y + 1}
+            Right -> {x = x + 1, y = y}
+            Left -> {x = x - 1, y = y}
 
 changeSnakeDirection : Model -> Maybe SnakeMoveDirection -> (Model, Cmd Msg)
 changeSnakeDirection model maybeMove =
     let 
         updatedModel =
             case maybeMove of
-                Just move ->
-                    let snake = model.snake
-                        updatedSnake = { snake | moveDirection = move }
-                    in { model | snake = updatedSnake }
+                Just move -> { model | snake = updateSnakeDirection model.snake move } 
                 Nothing -> model
     in
         ( updatedModel
         , Cmd.none
         )
+
+updateSnakeDirection : Snake -> SnakeMoveDirection -> Snake
+updateSnakeDirection snake move =
+    if isOppositeDirection snake.moveDirection move then
+        snake
+    else
+        { snake | moveDirection = move }
+
+isOppositeDirection : SnakeMoveDirection -> SnakeMoveDirection -> Bool
+isOppositeDirection oldDirection newDirection =
+    getOppositeDirection newDirection == oldDirection
+
+getOppositeDirection : SnakeMoveDirection -> SnakeMoveDirection
+getOppositeDirection direction =
+    case direction of
+        Top -> Bottom
+        Bottom -> Top
+        Right -> Left
+        Left -> Right
         
 type Msg 
     = MoveSnake Time.Posix
     | ChangeDirection (Maybe SnakeMoveDirection)
-    | GameOver
+    | PutFood Food
 
 update : Msg -> Model -> (Model, Cmd Msg)
 update msg model =
@@ -136,18 +196,43 @@ update msg model =
             moveSnake model
         ChangeDirection maybeMove ->
             changeSnakeDirection model maybeMove
-        GameOver ->
-            ( { model | status = Ended }
-            , Cmd.none
-            )
+        PutFood foodPosition ->
+            putFood model foodPosition
+
+generateFood : Model -> (Model, Cmd Msg)
+generateFood model =
+    ( model
+    , Random.generate PutFood positionGenerator
+    )
+
+putFood : Model -> Position -> (Model, Cmd Msg)
+putFood model foodPosition =
+    if isSnakePosition model.snake foodPosition then
+        generateFood model
+    else
+        ( { model | food = foodPosition }
+        , Cmd.none
+        )
+
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    Sub.batch
-        [ Time.every 500 MoveSnake
-        , Events.onKeyDown keyDecoder
-        ]
-    
+    if model.status == GameOver then
+        Sub.none
+    else
+        Sub.batch
+            [ Time.every 250 MoveSnake
+            , Events.onKeyDown keyDecoder
+            ]
+
+isSnakeTailPosition : SnakeTail -> Position -> Bool
+isSnakeTailPosition tail cellPosition =
+    Util.memberCallback (\tailPos -> isPositionEqual tailPos cellPosition) tail
+
+isSnakePosition : Snake -> Position -> Bool
+isSnakePosition snake cellPosition
+    =  (isPositionEqual cellPosition snake.head)
+    || (isSnakeTailPosition snake.tail cellPosition)  
 
 
 renderCell : Model -> Int -> Int -> Html Msg
@@ -157,11 +242,11 @@ renderCell model rowIndex cellIndex =
             { x = cellIndex
             , y = rowIndex
             }
-        snakeHeadPosition =
-            model.snake.head
     in
-        if (isPositionEqual cellPosition snakeHeadPosition) then
+        if (isSnakePosition model.snake cellPosition) then
             snakeCell [] []
+        else if isPositionEqual model.food cellPosition then
+            foodCell [] []
         else
             emptyCell [] []
 
@@ -192,6 +277,13 @@ view model =
         gameView model
     else
         gameOverView
+
+positionGenerator : Random.Generator Position
+positionGenerator =
+    Random.map2
+        (\x y -> { x = x, y = y })
+        (Random.int 1 10)
+        (Random.int 1 10)
 
 
 keyDecoder : Decode.Decoder Msg

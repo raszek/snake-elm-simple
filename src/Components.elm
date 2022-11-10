@@ -34,3 +34,8 @@ snakeCell =
         [ backgroundColor (rgb 0 0 0)
         ]
 
+foodCell =
+    styled emptyCell
+        [ backgroundColor (rgb 255 0 0)
+        ]
+
